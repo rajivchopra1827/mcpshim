@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	mcpclient "github.com/mark3labs/mcp-go/client"
-	mcpproto "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mcpshim/mcpshim/internal/config"
 	"github.com/mcpshim/mcpshim/internal/store"
 )
@@ -16,23 +14,39 @@ import (
 var ErrNoToken = errors.New("no stored token")
 
 // ErrNoRefreshToken is returned when the stored token has no refresh_token,
-// so background refresh isn't possible.
+// so background refresh isn't possible without user interaction.
 var ErrNoRefreshToken = errors.New("stored token has no refresh_token")
 
-// RefreshTokenIfStale checks the stored OAuth token for a server and triggers
-// a refresh via mark3labs/mcp-go's built-in refresh path if the token is
-// missing, already expired, or expires within `buffer`. Returns whether a
-// refresh was attempted.
+// ErrRefreshNotImplemented is returned while the proper refresh primitive
+// is being designed. The ticker should still scan and surface stale tokens
+// so users know they need to re-login, even if mcpshim can't yet refresh
+// non-interactively. See TODO below.
+var ErrRefreshNotImplemented = errors.New("background refresh not yet implemented; run `mcpshim login --server <name>`")
+
+// RefreshTokenIfStale checks the stored OAuth token for a server and
+// reports whether it's stale enough to warrant refresh. The actual
+// non-interactive refresh primitive is still in design.
 //
-// The mark3labs/mcp-go client refreshes on Initialize() / on each request when
-// the access_token has expired but a valid refresh_token is present, then
-// writes the new token through the configured TokenStore. We piggyback on that
-// by simply running an Initialize() with an OAuth-aware client; if the token
-// was already fresh, it's a cheap no-op call.
+// TODO(refresh): mark3labs/mcp-go's OAuthHandler.RefreshToken needs an
+// OAuthHandler that's been initialized via the same path
+// NewOAuthStreamableHttpClient uses internally — naive construction +
+// SetBaseURL(s.URL) is rejected by Granola/Notion's OAuth providers
+// with 403. The working pattern is to trigger an Initialize() failure,
+// catch the OAuthAuthorizationRequiredError, and use the Handler
+// attached to that error (which has proper discovery state). That
+// handler is opaque to us today; building one from scratch needs
+// either ClientID persistence (see oauth_tokens schema) or replicating
+// the StreamableHTTPClient handler-setup path.
 //
-// Returns (false, nil) when the token is fresh, missing, or has no
-// refresh_token to use. Returns (true, err) when refresh was attempted; err
-// is non-nil only if the refresh path itself failed (e.g. revoked token).
+// Until then this function reports staleness without attempting
+// network refresh. The ticker logs the stale state once per tick so
+// the user has visible signal that re-login is needed.
+//
+// Returns:
+//   - (false, ErrNoToken)         no token stored
+//   - (false, ErrNoRefreshToken)  stored token can't be refreshed
+//   - (false, nil)                token still well within validity
+//   - (true,  ErrRefreshNotImplemented)  stale, would refresh, but stub
 func RefreshTokenIfStale(ctx context.Context, s config.MCPServer, dbStore *store.Store, buffer time.Duration) (bool, error) {
 	if dbStore == nil {
 		return false, errors.New("nil store")
@@ -49,31 +63,10 @@ func RefreshTokenIfStale(ctx context.Context, s config.MCPServer, dbStore *store
 		return false, ErrNoRefreshToken
 	}
 
-	// If we know expiry and we're still well within it, skip.
+	// Still well within validity — nothing to do.
 	if !token.ExpiresAt.IsZero() && time.Until(token.ExpiresAt) > buffer {
 		return false, nil
 	}
 
-	oauthClient, closeFn, err := newOAuthClient(s, mcpclient.OAuthConfig{
-		// RedirectURI is unused for the refresh-only path but required by the
-		// client constructor — point at a placeholder that's never actually hit.
-		RedirectURI: "http://127.0.0.1:53685/oauth/callback",
-		TokenStore:  newSQLiteTokenStore(dbStore, s.Name),
-		PKCEEnabled: true,
-	})
-	if err != nil {
-		return true, fmt.Errorf("build oauth client: %w", err)
-	}
-	defer closeFn()
-
-	if err := oauthClient.Start(ctx); err != nil {
-		return true, fmt.Errorf("start client: %w", err)
-	}
-	initReq := mcpproto.InitializeRequest{}
-	initReq.Params.ProtocolVersion = mcpproto.LATEST_PROTOCOL_VERSION
-	initReq.Params.ClientInfo = mcpproto.Implementation{Name: "mcpshimd-refresh", Version: "dev"}
-	if _, err := oauthClient.Initialize(ctx, initReq); err != nil {
-		return true, fmt.Errorf("initialize for refresh: %w", err)
-	}
-	return true, nil
+	return true, ErrRefreshNotImplemented
 }
