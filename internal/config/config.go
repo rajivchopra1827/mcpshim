@@ -20,6 +20,12 @@ type Config struct {
 type ServerConfig struct {
 	SocketPath string `yaml:"socket_path"`
 	DBPath     string `yaml:"db_path"`
+	// TokenRefreshIntervalSec controls how often the daemon scans stored
+	// OAuth tokens to pre-emptively refresh ones nearing expiry. Default 300s.
+	TokenRefreshIntervalSec int `yaml:"token_refresh_interval_sec,omitempty"`
+	// TokenRefreshBufferSec is the headroom: tokens expiring within this many
+	// seconds get refreshed on the next tick. Default 1800s (30 min).
+	TokenRefreshBufferSec int `yaml:"token_refresh_buffer_sec,omitempty"`
 }
 
 type MCPServer struct {

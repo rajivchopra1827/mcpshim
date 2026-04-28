@@ -89,6 +89,8 @@ func (s *Server) Run() error {
 		}
 	}()
 
+	go s.runTokenRefreshTicker(ctx)
+
 	go func() {
 		<-ctx.Done()
 		_ = ln.Close()
