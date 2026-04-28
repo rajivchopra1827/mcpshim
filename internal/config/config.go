@@ -34,6 +34,12 @@ type MCPServer struct {
 	URL       string            `yaml:"url"`
 	Transport string            `yaml:"transport,omitempty"`
 	Headers   map[string]string `yaml:"headers,omitempty"`
+	// OAuth is preserved as opaque YAML to tolerate user-supplied
+	// per-server OAuth hints (client_id, scopes, etc.). The current
+	// mcpshim OAuth flow uses mark3labs/mcp-go's dynamic registration
+	// so these fields aren't consumed today, but stripping them would
+	// break existing configs.
+	OAuth map[string]interface{} `yaml:"oauth,omitempty"`
 }
 
 func normalizeTransport(value string) (string, error) {
