@@ -72,15 +72,14 @@ func (s *Server) refreshAllTokens(ctx context.Context, buffer time.Duration) {
 			if s.debug {
 				log.Printf("token-refresh %s: skipped (%v)", srv.Name, err)
 			}
-		case errors.Is(err, mcp.ErrRefreshNotImplemented):
-			// Stale token detected but the non-interactive refresh
-			// primitive isn't shipped yet. Surface as a warning so the
-			// user knows to re-login.
-			log.Printf("token-refresh %s: STALE — run `mcpshim login --server %s`", srv.Name, srv.Name)
+		case errors.Is(err, mcp.ErrNoClientID):
+			// One-time migration prompt: tokens stored before client_id
+			// persistence was added need a single re-login to capture it.
+			log.Printf("token-refresh %s: needs one-time re-login to enable background refresh: `mcpshim login --server %s`", srv.Name, srv.Name)
 		case err != nil:
 			log.Printf("token-refresh %s: error: %v", srv.Name, err)
 		case refreshed:
-			log.Printf("token-refresh %s: refreshed", srv.Name)
+			log.Printf("token-refresh %s: refreshed/verified", srv.Name)
 		default:
 			if s.debug {
 				log.Printf("token-refresh %s: still fresh", srv.Name)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	mcpclient "github.com/mark3labs/mcp-go/client"
@@ -70,6 +71,20 @@ CREATE TABLE IF NOT EXISTS oauth_tokens (
 `)
 	if err != nil {
 		return fmt.Errorf("init sqlite schema: %w", err)
+	}
+
+	// Idempotent column add for client_id. Captures the OAuth client_id
+	// returned by dynamic registration so the daemon can re-use it on
+	// background refresh; without it, refresh requests get rejected with
+	// invalid_grant / Client ID mismatch by strict providers (Linear,
+	// Notion, etc.). Existing rows have NULL until the user re-logs.
+	if _, err := s.db.Exec(`ALTER TABLE oauth_tokens ADD COLUMN client_id TEXT`); err != nil {
+		// Already-exists is the expected case after first migration.
+		// SQLite returns "duplicate column name: client_id" — match by
+		// substring rather than parsing structured error codes.
+		if !strings.Contains(err.Error(), "duplicate column name") {
+			return fmt.Errorf("add client_id column: %w", err)
+		}
 	}
 	return nil
 }
@@ -215,6 +230,50 @@ ON CONFLICT(server) DO UPDATE SET token_json=excluded.token_json, updated_at_utc
 `, server, string(data), time.Now().UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return fmt.Errorf("save token: %w", err)
+	}
+	return nil
+}
+
+// GetClientID reads the persisted OAuth client_id for a server, or empty
+// string if none has been captured yet (e.g., the user logged in before
+// mcpshim started persisting client_ids).
+func (s *Store) GetClientID(server string) (string, error) {
+	var clientID sql.NullString
+	err := s.db.QueryRow(`SELECT client_id FROM oauth_tokens WHERE server = ?`, server).Scan(&clientID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", nil
+		}
+		return "", fmt.Errorf("get client_id: %w", err)
+	}
+	if !clientID.Valid {
+		return "", nil
+	}
+	return clientID.String, nil
+}
+
+// SaveClientID persists the OAuth client_id captured at login time.
+// Updates the row in place; the existing token (if any) is unaffected.
+func (s *Store) SaveClientID(server, clientID string) error {
+	if server == "" || clientID == "" {
+		return fmt.Errorf("server and client_id are required")
+	}
+	res, err := s.db.Exec(`UPDATE oauth_tokens SET client_id = ? WHERE server = ?`, clientID, server)
+	if err != nil {
+		return fmt.Errorf("save client_id: %w", err)
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		// No token row yet; insert a placeholder. Token will be filled in
+		// by the next SaveToken from the OAuth flow.
+		_, err = s.db.Exec(`
+INSERT INTO oauth_tokens (server, token_json, updated_at_utc, client_id)
+VALUES (?, '{}', ?, ?)
+ON CONFLICT(server) DO UPDATE SET client_id=excluded.client_id
+`, server, time.Now().UTC().Format(time.RFC3339Nano), clientID)
+		if err != nil {
+			return fmt.Errorf("insert client_id placeholder: %w", err)
+		}
 	}
 	return nil
 }

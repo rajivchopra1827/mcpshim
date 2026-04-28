@@ -70,9 +70,13 @@ func runWithOAuthFallback[T any](ctx context.Context, s config.MCPServer, dbStor
 		return zero, errors.New("oauth callback server is not available")
 	}
 
-	if err := completeOAuthFlow(ctx, err, callback, false); err != nil {
+	clientID, completeErr := completeOAuthFlow(ctx, err, callback, false)
+	if completeErr != nil {
 		var zero T
-		return zero, err
+		return zero, completeErr
+	}
+	if clientID != "" && dbStore != nil {
+		_ = dbStore.SaveClientID(s.Name, clientID)
 	}
 
 	return runOperationWithClient(ctx, oauthClient, operation)
@@ -111,7 +115,14 @@ func runOAuthLogin(ctx context.Context, s config.MCPServer, dbStore *store.Store
 		return err
 	}
 
-	return completeOAuthFlow(ctx, err, callback, manual)
+	clientID, completeErr := completeOAuthFlow(ctx, err, callback, manual)
+	if completeErr != nil {
+		return completeErr
+	}
+	if clientID != "" && dbStore != nil {
+		_ = dbStore.SaveClientID(s.Name, clientID)
+	}
+	return nil
 }
 
 func runOperation[T any](ctx context.Context, s config.MCPServer, operation func(compatibleClient) (T, error)) (T, error) {
@@ -214,31 +225,34 @@ func (s *oauthCallbackServer) close() {
 	_ = s.listener.Close()
 }
 
-func completeOAuthFlow(ctx context.Context, authErr error, callback *oauthCallbackServer, manual bool) error {
+// completeOAuthFlow returns the registered ClientID alongside any error so
+// callers can persist it via dbStore.SaveClientID for future refresh.
+func completeOAuthFlow(ctx context.Context, authErr error, callback *oauthCallbackServer, manual bool) (string, error) {
 	oauthHandler := mcpclient.GetOAuthHandler(authErr)
 	if oauthHandler == nil {
-		return authErr
+		return "", authErr
 	}
 
 	codeVerifier, err := mcpclient.GenerateCodeVerifier()
 	if err != nil {
-		return err
+		return "", err
 	}
 	state, err := mcpclient.GenerateState()
 	if err != nil {
-		return err
+		return "", err
 	}
 	codeChallenge := mcpclient.GenerateCodeChallenge(codeVerifier)
 
 	if oauthHandler.GetClientID() == "" {
 		if err := oauthHandler.RegisterClient(ctx, "mcpshim"); err != nil {
-			return err
+			return "", err
 		}
 	}
+	clientID := oauthHandler.GetClientID()
 
 	authURL, err := oauthHandler.GetAuthorizationURL(ctx, state, codeChallenge)
 	if err != nil {
-		return err
+		return clientID, err
 	}
 
 	fmt.Printf("oauth login required; authorize here: %s\n", authURL)
@@ -249,18 +263,18 @@ func completeOAuthFlow(ctx context.Context, authErr error, callback *oauthCallba
 		fmt.Println("manual mode: complete login in any browser/device, then paste the final redirect URL (or code).")
 		params, err := readManualOAuthInput(state)
 		if err != nil {
-			return err
+			return clientID, err
 		}
 		if code := params["code"]; code != "" {
-			return oauthHandler.ProcessAuthorizationResponse(ctx, code, state, codeVerifier)
+			return clientID, oauthHandler.ProcessAuthorizationResponse(ctx, code, state, codeVerifier)
 		}
 		if oauthError := params["error"]; oauthError != "" {
-			return fmt.Errorf("oauth authorization failed: %s", oauthError)
+			return clientID, fmt.Errorf("oauth authorization failed: %s", oauthError)
 		}
-		return errors.New("oauth authorization did not return a code")
+		return clientID, errors.New("oauth authorization did not return a code")
 	}
 	if callback == nil {
-		return errors.New("oauth callback server is not available")
+		return clientID, errors.New("oauth callback server is not available")
 	}
 	fmt.Println("waiting for oauth callback...")
 
@@ -269,18 +283,18 @@ func completeOAuthFlow(ctx context.Context, authErr error, callback *oauthCallba
 
 	params, err := callback.wait(waitCtx)
 	if err != nil {
-		return err
+		return clientID, err
 	}
 	if params["state"] != state {
-		return fmt.Errorf("oauth state mismatch")
+		return clientID, fmt.Errorf("oauth state mismatch")
 	}
 	if code := params["code"]; code != "" {
-		return oauthHandler.ProcessAuthorizationResponse(ctx, code, state, codeVerifier)
+		return clientID, oauthHandler.ProcessAuthorizationResponse(ctx, code, state, codeVerifier)
 	}
 	if oauthError := params["error"]; oauthError != "" {
-		return fmt.Errorf("oauth authorization failed: %s", oauthError)
+		return clientID, fmt.Errorf("oauth authorization failed: %s", oauthError)
 	}
-	return errors.New("oauth authorization did not return a code")
+	return clientID, errors.New("oauth authorization did not return a code")
 }
 
 func readManualOAuthInput(expectedState string) (map[string]string, error) {
