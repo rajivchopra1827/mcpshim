@@ -239,6 +239,8 @@ func Run(binaryName string, argv []string) int {
 		return runLoginLocal(server, manual)
 	case "script":
 		return runScriptCommand(rest, socketPath)
+	case "serve":
+		return runServeLocal()
 	default:
 		if len(rest) > 0 {
 			resp, err := call(protocol.Request{
@@ -721,6 +723,38 @@ func normalizeMultiline(input string) string {
 	return strings.Join(lines, "\n")
 }
 
+// runServeLocal runs the stdio MCP server that aggregates every configured
+// upstream into one flat-namespaced surface. Loads config + opens the SQLite
+// store directly (does NOT connect to the daemon's Unix socket); both
+// processes share state via the same files, so the daemon's background
+// refresh ticker keeps tokens fresh for this process too.
+//
+// Intended for use as a Claude Code MCP server entry:
+//
+//	"mcpshim": {"type": "stdio", "command": "mcpshim", "args": ["serve"]}
+func runServeLocal() int {
+	cfg, err := config.Load(config.DefaultConfigPath())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	dbStore, err := store.Open(cfg.Server.DBPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer dbStore.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := mcp.RunServe(ctx, cfg, dbStore); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	return 0
+}
+
 func runLoginLocal(server string, manual bool) int {
 	cfg, err := config.Load(config.DefaultConfigPath())
 	if err != nil {
@@ -1041,5 +1075,6 @@ func usage() {
 	fmt.Println("  status")
 	fmt.Println("  history [--server name] [--tool name] [--limit 50]")
 	fmt.Println("  script [--install] [--dir ~/.local/bin]")
+	fmt.Println("  serve   (run as stdio MCP server aggregating all upstreams)")
 	fmt.Println("  <server-alias> <tool> [--arg value]")
 }
