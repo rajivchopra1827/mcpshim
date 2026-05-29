@@ -41,12 +41,25 @@ func (r *Registry) Servers() []protocol.ServerInfo {
 	defer r.mu.RUnlock()
 	out := make([]protocol.ServerInfo, 0, len(r.cfg.Servers))
 	for _, s := range r.cfg.Servers {
+		// HasAuth: true if either a static Authorization header is configured
+		// OR an OAuth token exists in the token store. Previously this only
+		// reflected static headers, so OAuth-flow servers (granola, linear,
+		// notion) reported false despite being fully authenticated, which
+		// would cause any consumer that gates on has_auth (worker agents,
+		// health checks) to short-circuit on apparently-unavailable upstreams
+		// that were actually healthy.
+		hasAuth := hasAuthorizationHeader(s.Headers)
+		if !hasAuth && r.store != nil {
+			if tok, err := r.store.GetToken(s.Name); err == nil && tok != nil && tok.AccessToken != "" {
+				hasAuth = true
+			}
+		}
 		out = append(out, protocol.ServerInfo{
 			Name:      s.Name,
 			Alias:     s.Alias,
 			URL:       s.URL,
 			Transport: s.Transport,
-			HasAuth:   hasAuthorizationHeader(s.Headers),
+			HasAuth:   hasAuth,
 		})
 	}
 	return out
